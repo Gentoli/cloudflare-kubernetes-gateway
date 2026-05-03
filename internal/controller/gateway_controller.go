@@ -437,74 +437,27 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 	token := string((*res).(shared.UnionString))
 
-	// Check if the deployment already exists, if not create a new one
-	found := &appsv1.Deployment{}
-	err = r.Get(ctx, types.NamespacedName{Name: gateway.Name, Namespace: gateway.Namespace}, found)
-	// TODO update existing deployment eg image changes
-	if err != nil && apierrors.IsNotFound(err) {
-		// Define a new deployment
-		dep, err := r.deploymentForGateway(gateway, token)
-		if err != nil {
-			log.Error(err, "Failed to define new Deployment resource for Gateway")
-
-			// The following implementation will update the status
-			meta.SetStatusCondition(&gateway.Status.Conditions, metav1.Condition{Type: string(gatewayv1.GatewayConditionAccepted),
-				Status: metav1.ConditionFalse, Reason: "Reconciling", ObservedGeneration: gateway.Generation,
-				Message: fmt.Sprintf("Failed to create Deployment for the custom resource (%s): (%s)", gateway.Name, err)})
-
-			if err := r.Status().Update(ctx, gateway); err != nil {
-				log.Error(err, "Failed to update Gateway status")
-				return ctrl.Result{}, err
-			}
-
-			return ctrl.Result{}, err
+	// Reconcile the Deployment using Server-Side Apply
+	dep, err := r.deploymentForGateway(gateway, token)
+	if err != nil {
+		log.Error(err, "Failed to define Deployment resource for Gateway")
+		// Update status with failure
+		meta.SetStatusCondition(&gateway.Status.Conditions, metav1.Condition{Type: string(gatewayv1.GatewayConditionAccepted),
+			Status: metav1.ConditionFalse, Reason: "Reconciling", ObservedGeneration: gateway.Generation,
+			Message: fmt.Sprintf("Failed to define Deployment for the custom resource (%s): (%s)", gateway.Name, err)})
+		if err := r.Status().Update(ctx, gateway); err != nil {
+			log.Error(err, "Failed to update Gateway status")
 		}
-
-		log.Info("Creating a new Deployment",
-			"Deployment.Namespace", dep.Namespace, "Deployment.Name", dep.Name)
-		if err = r.Create(ctx, dep); err != nil {
-			log.Error(err, "Failed to create new Deployment",
-				"Deployment.Namespace", dep.Namespace, "Deployment.Name", dep.Name)
-			return ctrl.Result{}, err
-		}
-
-		// Deployment created successfully
-		// We will requeue the reconciliation so that we can ensure the state
-		// and move forward for the next operations
-		return ctrl.Result{RequeueAfter: time.Minute}, nil
-	} else if err != nil {
-		log.Error(err, "Failed to get Deployment")
-		// Let's return the error for the reconciliation be re-trigged again
 		return ctrl.Result{}, err
-	} else {
-		// Define a new deployment
-		dep, err := r.deploymentForGateway(gateway, token)
-		if err != nil {
-			log.Error(err, "Failed to define new Deployment resource for Gateway")
-
-			// The following implementation will update the status
-			meta.SetStatusCondition(&gateway.Status.Conditions, metav1.Condition{Type: string(gatewayv1.GatewayConditionAccepted),
-				Status: metav1.ConditionFalse, Reason: "Reconciling", ObservedGeneration: gateway.Generation,
-				Message: fmt.Sprintf("Failed to update Deployment for the custom resource (%s): (%s)", gateway.Name, err)})
-
-			if err := r.Status().Update(ctx, gateway); err != nil {
-				log.Error(err, "Failed to update Gateway status")
-				return ctrl.Result{}, err
-			}
-
-			return ctrl.Result{}, err
-		}
-
-		if err := r.Update(ctx, dep); err != nil {
-			if strings.Contains(err.Error(), "apply your changes to the latest version and try again") {
-				log.Info("Conflict when updating Deployment, retrying")
-				return ctrl.Result{Requeue: true}, nil
-			} else {
-				log.Error(err, "Failed to update Deployment")
-				return ctrl.Result{}, err
-			}
-		}
 	}
+
+	if err := r.Patch(ctx, dep, client.Apply, client.FieldOwner(controllerName), client.ForceOwnership); err != nil {
+		log.Error(err, "Failed to apply Deployment using SSA")
+		return ctrl.Result{}, err
+	}
+
+	log.Info("Applied Deployment using Server-Side Apply",
+		"Deployment.Namespace", dep.Namespace, "Deployment.Name", dep.Name)
 
 	if err := r.Get(ctx, req.NamespacedName, gateway); err != nil {
 		log.Error(err, "Failed to re-fetch gateway")
@@ -612,6 +565,10 @@ func (r *GatewayReconciler) deploymentForGateway(
 	}
 
 	dep := &appsv1.Deployment{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "apps/v1",
+			Kind:       "Deployment",
+		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      gateway.Name,
 			Namespace: gateway.Namespace,
