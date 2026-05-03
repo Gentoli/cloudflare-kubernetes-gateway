@@ -53,9 +53,9 @@ type GatewayReconciler struct {
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;update;watch
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways/finalizers,verbs=update
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways/status,verbs=update
-// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=create;get;list;update;patch;watch;delete
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;patch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create
-// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;patch
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -440,8 +440,22 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 	token := string((*res).(shared.UnionString))
 
+	// Reconcile the Secret using Server-Side Apply
+	sec := r.secretApplyConfigurationForGateway(gateway, token)
+	if err := r.Apply(ctx, sec, client.FieldOwner(controllerName), client.ForceOwnership); err != nil {
+		log.Error(err, "Failed to apply Secret using SSA")
+		// Update status with failure
+		meta.SetStatusCondition(&gateway.Status.Conditions, metav1.Condition{Type: string(gatewayv1.GatewayConditionAccepted),
+			Status: metav1.ConditionFalse, Reason: "Reconciling", ObservedGeneration: gateway.Generation,
+			Message: fmt.Sprintf("Failed to apply Secret for the custom resource (%s): (%s)", gateway.Name, err)})
+		if err := r.Status().Update(ctx, gateway); err != nil {
+			log.Error(err, "Failed to update Gateway status")
+		}
+		return ctrl.Result{}, err
+	}
+
 	// Reconcile the Deployment using Server-Side Apply
-	dep, err := r.deploymentApplyConfigurationForGateway(gateway, token)
+	dep, err := r.deploymentApplyConfigurationForGateway(gateway)
 	if err != nil {
 		log.Error(err, "Failed to define Deployment resource for Gateway")
 		// Update status with failure
@@ -555,9 +569,30 @@ func (r *GatewayReconciler) doFinalizerOperationsForGateway(ctx context.Context,
 	return nil
 }
 
+func (r *GatewayReconciler) secretApplyConfigurationForGateway(
+	gateway *gatewayv1.Gateway, token string) *corev1apply.SecretApplyConfiguration {
+	ls := labelsForGateway(gateway.Name)
+
+	sec := corev1apply.Secret(gateway.Name, gateway.Namespace).
+		WithLabels(ls).
+		WithStringData(map[string]string{
+			"TUNNEL_TOKEN": token,
+		})
+
+	sec.WithOwnerReferences(metav1apply.OwnerReference().
+		WithAPIVersion(gatewayv1.GroupVersion.String()).
+		WithKind("Gateway").
+		WithName(gateway.Name).
+		WithUID(gateway.UID).
+		WithController(true).
+		WithBlockOwnerDeletion(true))
+
+	return sec
+}
+
 // deploymentApplyConfigurationForGateway returns a Gateway Deployment ApplyConfiguration object
 func (r *GatewayReconciler) deploymentApplyConfigurationForGateway(
-	gateway *gatewayv1.Gateway, token string) (*appsv1apply.DeploymentApplyConfiguration, error) {
+	gateway *gatewayv1.Gateway) (*appsv1apply.DeploymentApplyConfiguration, error) {
 	ls := labelsForGateway(gateway.Name)
 	replicas := int32(1)
 
@@ -607,6 +642,15 @@ func (r *GatewayReconciler) deploymentApplyConfigurationForGateway(
 						WithImage(image).
 						WithName("gateway").
 						WithImagePullPolicy(corev1.PullIfNotPresent).
+						WithEnv(corev1apply.EnvVar().
+							WithName("TUNNEL_TOKEN").
+							WithValueFrom(corev1apply.EnvVarSource().
+								WithSecretKeyRef(corev1apply.SecretKeySelector().
+									WithName(gateway.Name).
+									WithKey("TUNNEL_TOKEN"),
+								),
+							),
+						).
 						WithSecurityContext(corev1apply.SecurityContext().
 							WithRunAsNonRoot(true).
 							WithRunAsUser(1001).
@@ -615,7 +659,7 @@ func (r *GatewayReconciler) deploymentApplyConfigurationForGateway(
 								WithDrop("ALL"),
 							),
 						).
-						WithArgs("tunnel", "--no-autoupdate", "--metrics", "0.0.0.0:2000", "run", "--token", token),
+						WithArgs("tunnel", "--no-autoupdate", "--metrics", "0.0.0.0:2000", "run"),
 					),
 				),
 			).
