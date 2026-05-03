@@ -19,6 +19,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	appsv1apply "k8s.io/client-go/applyconfigurations/apps/v1"
+	corev1apply "k8s.io/client-go/applyconfigurations/core/v1"
+	metav1apply "k8s.io/client-go/applyconfigurations/meta/v1"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -438,7 +441,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	token := string((*res).(shared.UnionString))
 
 	// Reconcile the Deployment using Server-Side Apply
-	dep, err := r.deploymentForGateway(gateway, token)
+	dep, err := r.deploymentApplyConfigurationForGateway(gateway, token)
 	if err != nil {
 		log.Error(err, "Failed to define Deployment resource for Gateway")
 		// Update status with failure
@@ -451,13 +454,13 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
-	if err := r.Patch(ctx, dep, client.Apply, client.FieldOwner(controllerName), client.ForceOwnership); err != nil {
+	if err := r.Apply(ctx, dep, client.FieldOwner(controllerName), client.ForceOwnership); err != nil {
 		log.Error(err, "Failed to apply Deployment using SSA")
 		return ctrl.Result{}, err
 	}
 
 	log.Info("Applied Deployment using Server-Side Apply",
-		"Deployment.Namespace", dep.Namespace, "Deployment.Name", dep.Name)
+		"Deployment.Namespace", gateway.Namespace, "Deployment.Name", gateway.Name)
 
 	if err := r.Get(ctx, req.NamespacedName, gateway); err != nil {
 		log.Error(err, "Failed to re-fetch gateway")
@@ -552,9 +555,9 @@ func (r *GatewayReconciler) doFinalizerOperationsForGateway(ctx context.Context,
 	return nil
 }
 
-// deploymentForGateway returns a Gateway Deployment object
-func (r *GatewayReconciler) deploymentForGateway(
-	gateway *gatewayv1.Gateway, token string) (*appsv1.Deployment, error) {
+// deploymentApplyConfigurationForGateway returns a Gateway Deployment ApplyConfiguration object
+func (r *GatewayReconciler) deploymentApplyConfigurationForGateway(
+	gateway *gatewayv1.Gateway, token string) (*appsv1apply.DeploymentApplyConfiguration, error) {
 	ls := labelsForGateway(gateway.Name)
 	replicas := int32(1)
 
@@ -564,95 +567,74 @@ func (r *GatewayReconciler) deploymentForGateway(
 		return nil, err
 	}
 
-	dep := &appsv1.Deployment{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "apps/v1",
-			Kind:       "Deployment",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      gateway.Name,
-			Namespace: gateway.Namespace,
-		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: &replicas,
-			Selector: &metav1.LabelSelector{
-				MatchLabels: ls,
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: ls,
-				},
-				Spec: corev1.PodSpec{
-					Affinity: &corev1.Affinity{
-						NodeAffinity: &corev1.NodeAffinity{
-							RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
-								NodeSelectorTerms: []corev1.NodeSelectorTerm{
-									{
-										MatchExpressions: []corev1.NodeSelectorRequirement{
-											{
-												Key:      "kubernetes.io/arch",
-												Operator: "In",
-												Values:   []string{"amd64", "arm64"},
-											},
-											{
-												Key:      "kubernetes.io/os",
-												Operator: "In",
-												Values:   []string{"linux"},
-											},
-										},
-									},
-								},
-							},
-						},
-					},
-					SecurityContext: &corev1.PodSecurityContext{
-						RunAsNonRoot: &[]bool{true}[0],
-						// IMPORTANT: seccomProfile was introduced with Kubernetes 1.19
-						// If you are looking for to produce solutions to be supported
-						// on lower versions you must remove this option.
-						SeccompProfile: &corev1.SeccompProfile{
-							Type: corev1.SeccompProfileTypeRuntimeDefault,
-						},
-						Sysctls: []corev1.Sysctl{
-							{
-								Name:  "net.ipv4.ping_group_range",
-								Value: "0 0",
-							},
-						},
-					},
-					Containers: []corev1.Container{{
-						Image:           image,
-						Name:            "gateway",
-						ImagePullPolicy: corev1.PullIfNotPresent,
-						// Ensure restrictive context for the container
-						// More info: https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted
-						SecurityContext: &corev1.SecurityContext{
-							RunAsNonRoot:             &[]bool{true}[0],
-							RunAsUser:                &[]int64{1001}[0],
-							AllowPrivilegeEscalation: &[]bool{false}[0],
-							Capabilities: &corev1.Capabilities{
-								Drop: []corev1.Capability{
-									"ALL",
-								},
-							},
-						},
-						Args: []string{"tunnel", "--no-autoupdate", "--metrics", "0.0.0.0:2000", "run", "--token", token},
-					}},
-				},
-			},
-			Strategy: appsv1.DeploymentStrategy{
-				RollingUpdate: &appsv1.RollingUpdateDeployment{
-					MaxUnavailable: &intstr.IntOrString{IntVal: 0},
-				},
-			},
-		},
-	}
+	dep := appsv1apply.Deployment(gateway.Name, gateway.Namespace).
+		WithLabels(ls).
+		WithSpec(appsv1apply.DeploymentSpec().
+			WithReplicas(replicas).
+			WithSelector(metav1apply.LabelSelector().WithMatchLabels(ls)).
+			WithTemplate(corev1apply.PodTemplateSpec().
+				WithLabels(ls).
+				WithSpec(corev1apply.PodSpec().
+					WithAffinity(corev1apply.Affinity().
+						WithNodeAffinity(corev1apply.NodeAffinity().
+							WithRequiredDuringSchedulingIgnoredDuringExecution(corev1apply.NodeSelector().
+								WithNodeSelectorTerms(corev1apply.NodeSelectorTerm().
+									WithMatchExpressions(
+										corev1apply.NodeSelectorRequirement().
+											WithKey("kubernetes.io/arch").
+											WithOperator(corev1.NodeSelectorOpIn).
+											WithValues("amd64", "arm64"),
+										corev1apply.NodeSelectorRequirement().
+											WithKey("kubernetes.io/os").
+											WithOperator(corev1.NodeSelectorOpIn).
+											WithValues("linux"),
+									),
+								),
+							),
+						),
+					).
+					WithSecurityContext(corev1apply.PodSecurityContext().
+						WithRunAsNonRoot(true).
+						WithSeccompProfile(corev1apply.SeccompProfile().
+							WithType(corev1.SeccompProfileTypeRuntimeDefault),
+						).
+						WithSysctls(corev1apply.Sysctl().
+							WithName("net.ipv4.ping_group_range").
+							WithValue("0 0"),
+						),
+					).
+					WithContainers(corev1apply.Container().
+						WithImage(image).
+						WithName("gateway").
+						WithImagePullPolicy(corev1.PullIfNotPresent).
+						WithSecurityContext(corev1apply.SecurityContext().
+							WithRunAsNonRoot(true).
+							WithRunAsUser(1001).
+							WithAllowPrivilegeEscalation(false).
+							WithCapabilities(corev1apply.Capabilities().
+								WithDrop("ALL"),
+							),
+						).
+						WithArgs("tunnel", "--no-autoupdate", "--metrics", "0.0.0.0:2000", "run", "--token", token),
+					),
+				),
+			).
+			WithStrategy(appsv1apply.DeploymentStrategy().
+				WithRollingUpdate(appsv1apply.RollingUpdateDeployment().
+					WithMaxUnavailable(intstr.FromInt(0)),
+				),
+			),
+		)
 
 	// Set the ownerRef for the Deployment
-	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/owners-dependents/
-	if err := ctrl.SetControllerReference(gateway, dep, r.Scheme); err != nil {
-		return nil, err
-	}
+	dep.WithOwnerReferences(metav1apply.OwnerReference().
+		WithAPIVersion(gatewayv1.GroupVersion.String()).
+		WithKind("Gateway").
+		WithName(gateway.Name).
+		WithUID(gateway.UID).
+		WithController(true).
+		WithBlockOwnerDeletion(true))
+
 	return dep, nil
 }
 
