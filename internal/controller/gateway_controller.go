@@ -35,6 +35,10 @@ const gatewayClassFinalizer = "cfargotunnel.com/finalizer"
 const gatewayFinalizer = "cfargotunnel.com/finalizer"
 const controllerName = "github.com/pl4nty/cloudflare-kubernetes-gateway"
 
+const (
+	AnnotationTunnelName = "cloudflare.com/tunnel-name"
+)
+
 // GatewayReconciler reconciles a Gateway object
 type GatewayReconciler struct {
 	client.Client
@@ -79,7 +83,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	gateway := &gatewayv1.Gateway{}
 	if err := r.Get(ctx, req.NamespacedName, gateway); err != nil {
 		if apierrors.IsNotFound(err) {
-			// If the custom resource is not found then it usually means that it was deleted or not created
+			// If not found then it usually means that it was deleted or not created
 			// In this way, we will stop the reconciliation
 			log.Info("gateway resource not found. Ignoring since object must be deleted")
 			return ctrl.Result{}, nil
@@ -87,6 +91,11 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		// Error reading the object - requeue the request.
 		log.Error(err, "Failed to get gateway")
 		return ctrl.Result{}, err
+	}
+
+	tunnelName := gateway.Name
+	if val, ok := gateway.Annotations[AnnotationTunnelName]; ok {
+		tunnelName = val
 	}
 
 	// check if parent GatewayClass is ours and update finalizer
@@ -335,7 +344,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	tunnels, err := api.ZeroTrust.Tunnels.Cloudflared.List(ctx, zero_trust.TunnelCloudflaredListParams{
 		AccountID: cloudflare.String(account),
 		IsDeleted: cloudflare.Bool(false),
-		Name:      cloudflare.String(gateway.Name),
+		Name:      cloudflare.String(tunnelName),
 	})
 	if err != nil {
 		if strings.Contains(err.Error(), "429 Too Many Requests") {
@@ -354,7 +363,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		// secret is required, despite optional in docs and seemingly only needed for ConfigSrc=local
 		tunnel, err := api.ZeroTrust.Tunnels.Cloudflared.New(ctx, zero_trust.TunnelCloudflaredNewParams{
 			AccountID:    cloudflare.String(account),
-			Name:         cloudflare.String(gateway.Name),
+			Name:         cloudflare.String(tunnelName),
 			TunnelSecret: cloudflare.String("AQIDBAUGBwgBAgMEBQYHCAECAwQFBgcIAQIDBAUGBwg="),
 			// config_src = cloudflare
 		})
@@ -443,7 +452,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	// Reconcile the Secret using Server-Side Apply
-	sec := r.secretApplyConfigurationForGateway(gateway, *token)
+	sec := r.secretApplyConfigurationForGateway(gateway, tunnelName, *token)
 	if err := r.Apply(ctx, sec, client.FieldOwner(controllerName), client.ForceOwnership); err != nil {
 		log.Error(err, "Failed to apply Secret using SSA")
 		// Update status with failure
@@ -457,7 +466,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	// Reconcile the Deployment using Server-Side Apply
-	dep, err := r.deploymentApplyConfigurationForGateway(gateway)
+	dep, err := r.deploymentApplyConfigurationForGateway(gateway, tunnelName)
 	if err != nil {
 		log.Error(err, "Failed to define Deployment resource for Gateway")
 		// Update status with failure
@@ -511,10 +520,15 @@ func (r *GatewayReconciler) doFinalizerOperationsForGateway(ctx context.Context,
 
 	log := log.FromContext(ctx)
 
-	tunnel, err := api.ZeroTrust.Tunnels.List(ctx, zero_trust.TunnelListParams{
+	tunnelName := gateway.Name
+	if val, ok := gateway.Annotations[AnnotationTunnelName]; ok {
+		tunnelName = val
+	}
+
+	tunnel, err := api.ZeroTrust.Tunnels.Cloudflared.List(ctx, zero_trust.TunnelCloudflaredListParams{
 		AccountID: cloudflare.String(account),
 		IsDeleted: cloudflare.Bool(false),
-		Name:      cloudflare.String(gateway.Name),
+		Name:      cloudflare.String(tunnelName),
 	})
 	if err != nil {
 		log.Error(err, "Failed to get tunnel from Cloudflare API")
@@ -572,8 +586,8 @@ func (r *GatewayReconciler) doFinalizerOperationsForGateway(ctx context.Context,
 }
 
 func (r *GatewayReconciler) secretApplyConfigurationForGateway(
-	gateway *gatewayv1.Gateway, token string) *corev1apply.SecretApplyConfiguration {
-	ls := labelsForGateway(gateway.Name)
+	gateway *gatewayv1.Gateway, tunnelName string, token string) *corev1apply.SecretApplyConfiguration {
+	ls := labelsForGateway(tunnelName)
 
 	sec := corev1apply.Secret(gateway.Name, gateway.Namespace).
 		WithLabels(ls).
@@ -594,8 +608,8 @@ func (r *GatewayReconciler) secretApplyConfigurationForGateway(
 
 // deploymentApplyConfigurationForGateway returns a Gateway Deployment ApplyConfiguration object
 func (r *GatewayReconciler) deploymentApplyConfigurationForGateway(
-	gateway *gatewayv1.Gateway) (*appsv1apply.DeploymentApplyConfiguration, error) {
-	ls := labelsForGateway(gateway.Name)
+	gateway *gatewayv1.Gateway, tunnelName string) (*appsv1apply.DeploymentApplyConfiguration, error) {
+	ls := labelsForGateway(tunnelName)
 	replicas := int32(1)
 
 	// Get the Operand image

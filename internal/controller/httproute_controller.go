@@ -99,6 +99,11 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			continue
 		}
 
+		tunnelName := gateway.Name
+		if val, ok := gateway.Annotations[AnnotationTunnelName]; ok {
+			tunnelName = val
+		}
+
 		// search for sibling routes
 		siblingRoutes := []gatewayv1.HTTPRoute{}
 		for _, searchRoute := range routes.Items {
@@ -247,7 +252,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		tunnels, err := api.ZeroTrust.Tunnels.Cloudflared.List(ctx, zero_trust.TunnelCloudflaredListParams{
 			AccountID: cloudflare.String(account),
 			IsDeleted: cloudflare.Bool(false),
-			Name:      cloudflare.String(gateway.Name),
+			Name:      cloudflare.String(tunnelName),
 		})
 		if err != nil {
 			log.Error(err, "Failed to get tunnel from Cloudflare API")
