@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -33,6 +34,7 @@ type HTTPRouteReconciler struct {
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gatewayclasses,verbs=get
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=list
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=list;watch
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=backendtlspolicies,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -134,7 +136,13 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 					log.Info("HTTPRoute filters are not supported", rule.Filters)
 				}
 
-				services := map[string]bool{}
+				type backendService struct {
+					url              string
+					useTLS           bool
+					noTLSVerify      bool
+					originServerName string
+				}
+				services := map[string]backendService{}
 				for _, backend := range rule.BackendRefs {
 					if backend.Port == nil {
 						err := errors.New("HTTPRoute backend port is nil")
@@ -149,18 +157,74 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 						namespace = string(*backend.Namespace)
 					}
 
-					services[fmt.Sprintf("http://%s.%s:%d", string(backend.Name), namespace, int32(*backend.Port))] = true
+					var tlsPolicies gatewayv1.BackendTLSPolicyList
+					if err := r.List(ctx, &tlsPolicies, client.InNamespace(namespace)); err != nil {
+						log.Error(err, "Failed to list BackendTLSPolicies")
+					}
+
+					slices.SortFunc(tlsPolicies.Items, func(a, b gatewayv1.BackendTLSPolicy) int {
+						if a.CreationTimestamp.Before(&b.CreationTimestamp) {
+							return -1
+						}
+						if b.CreationTimestamp.Before(&a.CreationTimestamp) {
+							return 1
+						}
+						return strings.Compare(a.Name, b.Name)
+					})
+
+					protocol := "http"
+					useTLS := false
+					noTLSVerify := true
+					var originServerName string
+					for _, policy := range tlsPolicies.Items {
+						// Implementations SHOULD NOT support more than one targetRef at this time
+						if len(policy.Spec.TargetRefs) == 0 {
+							continue
+						}
+						target := policy.Spec.TargetRefs[0]
+						if (target.Group == "" || target.Group == "core") && target.Kind == "Service" && string(target.Name) == string(backend.Name) {
+							protocol = "https"
+							useTLS = true
+							if policy.Spec.Validation.WellKnownCACertificates != nil &&
+								string(*policy.Spec.Validation.WellKnownCACertificates) == "cloudflare.com/origin-ca" {
+								noTLSVerify = false
+							}
+							originServerName = string(policy.Spec.Validation.Hostname)
+							break
+						}
+					}
+
+					url := fmt.Sprintf("%s://%s.%s:%d", protocol, string(backend.Name), namespace, int32(*backend.Port))
+					key := fmt.Sprintf("%s/%s:%d", namespace, string(backend.Name), int32(*backend.Port))
+					if _, ok := services[key]; !ok {
+						services[key] = backendService{
+							url:              url,
+							useTLS:           useTLS,
+							noTLSVerify:      noTLSVerify,
+							originServerName: originServerName,
+						}
+					}
 				}
 
 				// product of hostname, path, service
 				for _, hostname := range route.Spec.Hostnames {
 					for path := range paths {
-						for service := range services {
-							ingress = append(ingress, zero_trust.TunnelConfigurationUpdateParamsConfigIngress{
+						for _, service := range services {
+							config := zero_trust.TunnelConfigurationUpdateParamsConfigIngress{
 								Hostname: cloudflare.String(string(hostname)),
 								Path:     cloudflare.String(path),
-								Service:  cloudflare.String(service),
-							})
+								Service:  cloudflare.String(service.url),
+							}
+							if service.useTLS {
+								originRequest := zero_trust.TunnelConfigurationUpdateParamsConfigIngressOriginRequest{
+									NoTLSVerify: cloudflare.F(service.noTLSVerify),
+								}
+								if service.originServerName != "" {
+									originRequest.OriginServerName = cloudflare.F(service.originServerName)
+								}
+								config.OriginRequest = cloudflare.F(originRequest)
+							}
+							ingress = append(ingress, config)
 						}
 					}
 				}
