@@ -11,6 +11,8 @@ import (
 	"github.com/cloudflare/cloudflare-go/v2/dns"
 	"github.com/cloudflare/cloudflare-go/v2/zero_trust"
 	"github.com/cloudflare/cloudflare-go/v2/zones"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -170,28 +172,6 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			Service: cloudflare.String("http_status:404"),
 		})
 
-		// increment AttachedRoutes in each gateway listener status
-		gatewayObj := &gatewayv1.Gateway{}
-		gatewayRef := types.NamespacedName{
-			Namespace: gateway.Namespace,
-			Name:      gateway.Name,
-		}
-		if err := r.Get(ctx, gatewayRef, gatewayObj); err != nil {
-			log.Error(err, "Failed to re-fetch gateway")
-			return ctrl.Result{}, err
-		}
-		listeners := []gatewayv1.ListenerStatus{}
-		for _, listener := range gatewayObj.Status.Listeners {
-			listener.AttachedRoutes = int32(len(ingress))
-			listeners = append(listeners, listener)
-		}
-		log.Info("Updating Gateway listeners", "AttachedRoutes", len(ingress))
-		gatewayObj.Status.Listeners = listeners
-		if err := r.Status().Update(ctx, gatewayObj); err != nil {
-			log.Error(err, "Failed to update Gateway status")
-			return ctrl.Result{}, err
-		}
-
 		account, api, err := InitCloudflareApi(ctx, r.Client, string(gateway.Spec.GatewayClassName))
 		if err != nil {
 			log.Error(err, "Failed to initialize Cloudflare API")
@@ -213,6 +193,53 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 		tunnel := tunnels.Result[0]
 
+		// increment AttachedRoutes in each gateway listener status and set Addresses
+		gatewayObj := &gatewayv1.Gateway{}
+		gatewayRef := types.NamespacedName{
+			Namespace: gateway.Namespace,
+			Name:      gateway.Name,
+		}
+		if err := r.Get(ctx, gatewayRef, gatewayObj); err != nil {
+			log.Error(err, "Failed to re-fetch gateway")
+			return ctrl.Result{}, err
+		}
+		listeners := []gatewayv1.ListenerStatus{}
+		for _, listener := range gatewayObj.Status.Listeners {
+			listener.AttachedRoutes = int32(len(ingress))
+			listeners = append(listeners, listener)
+		}
+		log.Info("Updating Gateway listeners", "AttachedRoutes", len(ingress))
+		gatewayObj.Status.Listeners = listeners
+
+		content := fmt.Sprintf("%s.cfargotunnel.com", tunnel.ID)
+		hostnameAddressType := gatewayv1.HostnameAddressType
+		gatewayObj.Status.Addresses = []gatewayv1.GatewayStatusAddress{{
+			Type:  &hostnameAddressType,
+			Value: content,
+		}}
+
+		tunnelOnly := false
+		if val, ok := gatewayObj.Annotations["cloudflare-kubernetes-gateway.com/tunnel-only"]; ok && val == "true" {
+			tunnelOnly = true
+		}
+
+		if tunnelOnly {
+			meta.SetStatusCondition(&gatewayObj.Status.Conditions, metav1.Condition{
+				Type:               "TunnelOnly",
+				Status:             metav1.ConditionTrue,
+				Reason:             "AnnotationSet",
+				ObservedGeneration: gatewayObj.Generation,
+				Message:            "Tunnel only mode enabled, skipping DNS record updates",
+			})
+		} else {
+			meta.RemoveStatusCondition(&gatewayObj.Status.Conditions, "TunnelOnly")
+		}
+
+		if err := r.Status().Update(ctx, gatewayObj); err != nil {
+			log.Error(err, "Failed to update Gateway status")
+			return ctrl.Result{}, err
+		}
+
 		_, err = api.ZeroTrust.Tunnels.Configurations.Update(ctx, tunnel.ID, zero_trust.TunnelConfigurationUpdateParams{
 			AccountID: cloudflare.String(account),
 			Config: cloudflare.F[zero_trust.TunnelConfigurationUpdateParamsConfig](
@@ -228,6 +255,10 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 		log.Info("Updated Tunnel configuration", "ingress", ingress)
 
+		if tunnelOnly {
+			continue
+		}
+
 		// duplicate CNAMEs can't exist, so the last parentRef wins
 		for _, gwHostname := range hostnames {
 			hostname := string(gwHostname)
@@ -236,7 +267,6 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 				return ctrl.Result{}, err
 			}
 
-			content := fmt.Sprintf("%s.cfargotunnel.com", tunnel.ID)
 			comment := "Managed by github.com/pl4nty/cloudflare-kubernetes-gateway"
 			records, _ := api.DNS.Records.List(ctx, dns.RecordListParams{
 				ZoneID:  cloudflare.String(zoneID),
