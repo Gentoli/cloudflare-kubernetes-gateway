@@ -2,9 +2,13 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/cloudflare/cloudflare-go/v2"
+	"github.com/cloudflare/cloudflare-go/v2/user"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -58,28 +62,15 @@ func (r *GatewayClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// validate parameters
-	msg := ""
-	_, api, err := InitCloudflareApi(ctx, r.Client, gatewayClass.Name)
-	if err == nil {
-		token, err := api.User.Tokens.Verify(ctx)
-		if err == nil {
-			if token.Status != "active" {
-				msg = fmt.Sprintf("Token status is %s, is not active. Please check the Cloudflare dashboard", token.Status)
-			}
-		} else {
-			msg = err.Error() + " Ensure ACCOUNT_ID and TOKEN are valid"
-		}
-	} else {
-		msg = err.Error() + " Ensure ACCOUNT_ID and TOKEN are set"
-	}
+	vErr := r.validateCloudflareToken(ctx, gatewayClass)
 
 	var condition metav1.Condition
-	if msg != "" {
+	if vErr != nil {
 		condition = metav1.Condition{
 			Type:               string(gatewayv1.GatewayClassConditionStatusAccepted),
 			Status:             metav1.ConditionFalse,
 			Reason:             string(gatewayv1.GatewayClassReasonInvalidParameters),
-			Message:            "Unable to initialize Cloudflare API. " + msg,
+			Message:            "Unable to initialize Cloudflare API. " + vErr.Error(),
 			ObservedGeneration: gatewayClass.Generation,
 		}
 	} else {
@@ -98,6 +89,43 @@ func (r *GatewayClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	return ctrl.Result{}, nil
+}
+func (r *GatewayClassReconciler) validateCloudflareToken(ctx context.Context, gatewayClass *gatewayv1.GatewayClass) error {
+	_, api, err := InitCloudflareApi(ctx, r.Client, gatewayClass.Name)
+	if err != nil {
+		return fmt.Errorf("%w. Ensure ACCOUNT_ID and TOKEN are set", err)
+	}
+
+	// 1. Check for token validity using the list endpoint.
+	// If List succeeds, the token is authenticated and has list permissions.
+	// Account tokens return a specific error message because they cannot list user tokens.
+	_, err = api.User.Tokens.List(ctx, user.TokenListParams{
+		PerPage: cloudflare.F(float64(1)),
+	})
+	if err == nil {
+		return nil
+	}
+
+	if cfErr, ok := errors.AsType[*cloudflare.Error](err); ok {
+		for _, e := range cfErr.Errors {
+			if strings.Contains(e.Message, "Valid user-level authentication not found") {
+				// Authenticated as Account Token. Verify() is not supported for account tokens.
+				return nil
+			}
+		}
+	}
+
+	// 2. For all other cases, use Verify().
+	token, err := api.User.Tokens.Verify(ctx)
+	if err != nil {
+		return fmt.Errorf("%w. Ensure ACCOUNT_ID and TOKEN are valid", err)
+	}
+
+	if token.Status != "active" {
+		return fmt.Errorf("token status is %s, is not active. Please check the Cloudflare dashboard", token.Status)
+	}
+
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
