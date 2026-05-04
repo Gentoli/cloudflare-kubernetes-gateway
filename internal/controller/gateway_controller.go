@@ -7,9 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cloudflare/cloudflare-go/v2"
-	"github.com/cloudflare/cloudflare-go/v2/shared"
-	"github.com/cloudflare/cloudflare-go/v2/zero_trust"
+	"github.com/cloudflare/cloudflare-go/v6"
+	"github.com/cloudflare/cloudflare-go/v6/zero_trust"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -333,7 +332,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	tunnels, err := api.ZeroTrust.Tunnels.List(ctx, zero_trust.TunnelListParams{
+	tunnels, err := api.ZeroTrust.Tunnels.Cloudflared.List(ctx, zero_trust.TunnelCloudflaredListParams{
 		AccountID: cloudflare.String(account),
 		IsDeleted: cloudflare.Bool(false),
 		Name:      cloudflare.String(gateway.Name),
@@ -353,7 +352,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if len(tunnels.Result) == 0 {
 		log.Info("Creating tunnel")
 		// secret is required, despite optional in docs and seemingly only needed for ConfigSrc=local
-		tunnel, err := api.ZeroTrust.Tunnels.New(ctx, zero_trust.TunnelNewParams{
+		tunnel, err := api.ZeroTrust.Tunnels.Cloudflared.New(ctx, zero_trust.TunnelCloudflaredNewParams{
 			AccountID:    cloudflare.String(account),
 			Name:         cloudflare.String(gateway.Name),
 			TunnelSecret: cloudflare.String("AQIDBAUGBwgBAgMEBQYHCAECAwQFBgcIAQIDBAUGBwg="),
@@ -435,17 +434,16 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	res, err := api.ZeroTrust.Tunnels.Token.Get(ctx, tunnelID, zero_trust.TunnelTokenGetParams{
+	token, err := api.ZeroTrust.Tunnels.Cloudflared.Token.Get(ctx, tunnelID, zero_trust.TunnelCloudflaredTokenGetParams{
 		AccountID: cloudflare.String(account),
 	})
 	if err != nil {
 		log.Error(err, "Failed to get tunnel token")
 		return ctrl.Result{}, err
 	}
-	token := string((*res).(shared.UnionString))
 
 	// Reconcile the Secret using Server-Side Apply
-	sec := r.secretApplyConfigurationForGateway(gateway, token)
+	sec := r.secretApplyConfigurationForGateway(gateway, *token)
 	if err := r.Apply(ctx, sec, client.FieldOwner(controllerName), client.ForceOwnership); err != nil {
 		log.Error(err, "Failed to apply Secret using SSA")
 		// Update status with failure
@@ -527,21 +525,21 @@ func (r *GatewayReconciler) doFinalizerOperationsForGateway(ctx context.Context,
 		log.Info("Deleting Tunnel")
 
 		// prepare for deletion - disconnect, after rotating secret to prevent reconnect
-		if _, err := api.ZeroTrust.Tunnels.Edit(ctx, tunnel.Result[0].ID, zero_trust.TunnelEditParams{
+		if _, err := api.ZeroTrust.Tunnels.Cloudflared.Edit(ctx, tunnel.Result[0].ID, zero_trust.TunnelCloudflaredEditParams{
 			AccountID:    cloudflare.String(account),
 			TunnelSecret: cloudflare.String("Vm0xd1MwMUhSWGhYV0d4VlYwZG9jVlZ0TVRSV01XeHpZVWR3VUZWVU1Eaz0="),
 		}); err != nil {
 			log.Error(err, "Failed to update tunnel secret")
 			return err
 		}
-		if _, err := api.ZeroTrust.Tunnels.Connections.Delete(ctx, tunnel.Result[0].ID, zero_trust.TunnelConnectionDeleteParams{
+		if _, err := api.ZeroTrust.Tunnels.Cloudflared.Connections.Delete(ctx, tunnel.Result[0].ID, zero_trust.TunnelCloudflaredConnectionDeleteParams{
 			AccountID: cloudflare.String(account),
 		}); err != nil {
 			log.Error(err, "Failed to delete tunnel connections")
 			return err
 		}
 
-		if _, err := api.ZeroTrust.Tunnels.Delete(ctx, tunnel.Result[0].ID, zero_trust.TunnelDeleteParams{
+		if _, err := api.ZeroTrust.Tunnels.Cloudflared.Delete(ctx, tunnel.Result[0].ID, zero_trust.TunnelCloudflaredDeleteParams{
 			AccountID: cloudflare.String(account),
 		}); err != nil {
 			log.Error(err, "Failed to delete tunnel")

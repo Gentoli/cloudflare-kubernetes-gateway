@@ -3,7 +3,7 @@ module github.com/pl4nty/cloudflare-kubernetes-gateway
 go 1.26
 
 require (
-	github.com/cloudflare/cloudflare-go/v2 v2.4.0
+	github.com/cloudflare/cloudflare-go/v6 v6.10.0
 	github.com/onsi/ginkgo/v2 v2.28.1
 	github.com/onsi/gomega v1.39.1
 	k8s.io/api v0.35.2

@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cloudflare/cloudflare-go/v2"
-	"github.com/cloudflare/cloudflare-go/v2/dns"
-	"github.com/cloudflare/cloudflare-go/v2/zero_trust"
-	"github.com/cloudflare/cloudflare-go/v2/zones"
+	"github.com/cloudflare/cloudflare-go/v6"
+	"github.com/cloudflare/cloudflare-go/v6/dns"
+	"github.com/cloudflare/cloudflare-go/v6/zero_trust"
+	"github.com/cloudflare/cloudflare-go/v6/zones"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -115,7 +115,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 
 		// fan out to siblings
-		ingress := []zero_trust.TunnelConfigurationUpdateParamsConfigIngress{}
+		ingress := []zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{}
 		for _, route := range siblingRoutes {
 			for _, rule := range route.Spec.Rules {
 				paths := map[string]bool{}
@@ -210,16 +210,16 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 				for _, hostname := range route.Spec.Hostnames {
 					for path := range paths {
 						for _, service := range services {
-							config := zero_trust.TunnelConfigurationUpdateParamsConfigIngress{
+							config := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
 								Hostname: cloudflare.String(string(hostname)),
 								Path:     cloudflare.String(path),
 								Service:  cloudflare.String(service.url),
 							}
 							if service.useTLS {
-								originRequest := zero_trust.TunnelConfigurationUpdateParamsConfigIngressOriginRequest{
+								originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{
 									NoTLSVerify:    cloudflare.F(service.noTLSVerify),
 									HTTP2Origin:    cloudflare.F(true),
-									MatchSNItoHost: cloudflare.F(true),
+									MatchSnItoHost: cloudflare.F(true),
 								}
 								if service.originServerName != "" {
 									originRequest.OriginServerName = cloudflare.F(service.originServerName)
@@ -234,7 +234,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 
 		// last rule must be the catch-all
-		ingress = append(ingress, zero_trust.TunnelConfigurationUpdateParamsConfigIngress{
+		ingress = append(ingress, zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
 			Service: cloudflare.String("http_status:404"),
 		})
 
@@ -244,7 +244,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			return ctrl.Result{}, err
 		}
 
-		tunnels, err := api.ZeroTrust.Tunnels.List(ctx, zero_trust.TunnelListParams{
+		tunnels, err := api.ZeroTrust.Tunnels.Cloudflared.List(ctx, zero_trust.TunnelCloudflaredListParams{
 			AccountID: cloudflare.String(account),
 			IsDeleted: cloudflare.Bool(false),
 			Name:      cloudflare.String(gateway.Name),
@@ -306,11 +306,11 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			return ctrl.Result{}, err
 		}
 
-		_, err = api.ZeroTrust.Tunnels.Configurations.Update(ctx, tunnel.ID, zero_trust.TunnelConfigurationUpdateParams{
+		_, err = api.ZeroTrust.Tunnels.Cloudflared.Configurations.Update(ctx, tunnel.ID, zero_trust.TunnelCloudflaredConfigurationUpdateParams{
 			AccountID: cloudflare.String(account),
-			Config: cloudflare.F[zero_trust.TunnelConfigurationUpdateParamsConfig](
-				zero_trust.TunnelConfigurationUpdateParamsConfig{
-					Ingress: cloudflare.F[[]zero_trust.TunnelConfigurationUpdateParamsConfigIngress](ingress),
+			Config: cloudflare.F[zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfig](
+				zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfig{
+					Ingress: cloudflare.F[[]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress](ingress),
 				},
 			),
 		})
@@ -337,19 +337,19 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			records, _ := api.DNS.Records.List(ctx, dns.RecordListParams{
 				ZoneID:  cloudflare.String(zoneID),
 				Proxied: cloudflare.Bool(true),
-				Type:    cloudflare.F[dns.RecordListParamsType]("CNAME"),
-				Name:    cloudflare.String(hostname),
+				Type:    cloudflare.F(dns.RecordListParamsTypeCNAME),
+				Name:    cloudflare.F(dns.RecordListParamsName{Exact: cloudflare.String(hostname)}),
 			})
 			if len(records.Result) == 0 {
 				_, err := api.DNS.Records.New(ctx, dns.RecordNewParams{
 					ZoneID: cloudflare.String(zoneID),
-					Record: dns.CNAMERecordParam{
+					Body: dns.RecordNewParamsBodyUnion(dns.CNAMERecordParam{
 						Proxied: cloudflare.Bool(true),
-						Type:    cloudflare.F[dns.CNAMERecordType]("CNAME"),
-						Name:    cloudflare.String(hostname),
-						Content: cloudflare.F[interface{}](content),
+						Type:    cloudflare.F(dns.CNAMERecordTypeCNAME),
+						Name:    cloudflare.F(hostname),
+						Content: cloudflare.F(content),
 						Comment: cloudflare.String(comment),
-					},
+					}),
 				})
 				if err != nil {
 					log.Error(err, "Failed to create DNS record", hostname, content)
@@ -358,13 +358,13 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			} else {
 				_, err := api.DNS.Records.Update(ctx, records.Result[0].ID, dns.RecordUpdateParams{
 					ZoneID: cloudflare.String(zoneID),
-					Record: dns.CNAMERecordParam{
+					Body: dns.RecordUpdateParamsBodyUnion(dns.CNAMERecordParam{
 						Proxied: cloudflare.Bool(true),
-						Type:    cloudflare.F[dns.CNAMERecordType]("CNAME"),
-						Name:    cloudflare.String(hostname),
-						Content: cloudflare.F[interface{}](content),
+						Type:    cloudflare.F(dns.CNAMERecordTypeCNAME),
+						Name:    cloudflare.F(hostname),
+						Content: cloudflare.F(content),
 						Comment: cloudflare.String(comment),
-					},
+					}),
 				})
 				if err != nil {
 					log.Error(err, "Failed to update DNS record", hostname, content)
@@ -392,9 +392,11 @@ func FindZoneID(hostname string, ctx context.Context, api *cloudflare.Client, ac
 	for parts := range len(strings.Split(hostname, ".")) {
 		zoneName := strings.Join(strings.Split(hostname, ".")[parts:], ".")
 		zones, err := api.Zones.List(ctx, zones.ZoneListParams{
-			Account: cloudflare.F(zones.ZoneListParamsAccount{ID: cloudflare.String(accountID)}),
-			Name:    cloudflare.String(zoneName),
-			Status:  cloudflare.F(zones.ZoneListParamsStatusActive),
+			Account: cloudflare.F(zones.ZoneListParamsAccount{
+				ID: cloudflare.String(accountID),
+			}),
+			Name:   cloudflare.String(zoneName),
+			Status: cloudflare.F(zones.ZoneListParamsStatusActive),
 		})
 		if err != nil {
 			log.Error(err, "Failed to list DNS zones")
