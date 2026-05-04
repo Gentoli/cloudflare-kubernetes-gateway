@@ -217,7 +217,9 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 							}
 							if service.useTLS {
 								originRequest := zero_trust.TunnelConfigurationUpdateParamsConfigIngressOriginRequest{
-									NoTLSVerify: cloudflare.F(service.noTLSVerify),
+									NoTLSVerify:    cloudflare.F(service.noTLSVerify),
+									HTTP2Origin:    cloudflare.F(true),
+									MatchSNItoHost: cloudflare.F(true),
 								}
 								if service.originServerName != "" {
 									originRequest.OriginServerName = cloudflare.F(service.originServerName)
