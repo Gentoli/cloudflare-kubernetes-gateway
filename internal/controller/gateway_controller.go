@@ -610,7 +610,6 @@ func (r *GatewayReconciler) secretApplyConfigurationForGateway(
 func (r *GatewayReconciler) deploymentApplyConfigurationForGateway(
 	gateway *gatewayv1.Gateway, tunnelName string) (*appsv1apply.DeploymentApplyConfiguration, error) {
 	ls := labelsForGateway(tunnelName)
-	replicas := int32(1)
 
 	// Get the Operand image
 	image, err := imageForGateway()
@@ -621,11 +620,22 @@ func (r *GatewayReconciler) deploymentApplyConfigurationForGateway(
 	dep := appsv1apply.Deployment(gateway.Name, gateway.Namespace).
 		WithLabels(ls).
 		WithSpec(appsv1apply.DeploymentSpec().
-			WithReplicas(replicas).
 			WithSelector(metav1apply.LabelSelector().WithMatchLabels(ls)).
 			WithTemplate(corev1apply.PodTemplateSpec().
 				WithLabels(ls).
 				WithSpec(corev1apply.PodSpec().
+					WithTopologySpreadConstraints(
+						corev1apply.TopologySpreadConstraint().
+							WithMaxSkew(1).
+							WithTopologyKey("kubernetes.io/zone").
+							WithWhenUnsatisfiable(corev1.ScheduleAnyway).
+							WithLabelSelector(metav1apply.LabelSelector().WithMatchLabels(ls)),
+						corev1apply.TopologySpreadConstraint().
+							WithMaxSkew(1).
+							WithTopologyKey("kubernetes.io/hostname").
+							WithWhenUnsatisfiable(corev1.ScheduleAnyway).
+							WithLabelSelector(metav1apply.LabelSelector().WithMatchLabels(ls)),
+					).
 					WithAffinity(corev1apply.Affinity().
 						WithNodeAffinity(corev1apply.NodeAffinity().
 							WithRequiredDuringSchedulingIgnoredDuringExecution(corev1apply.NodeSelector().
