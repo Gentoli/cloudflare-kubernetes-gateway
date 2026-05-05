@@ -43,21 +43,12 @@ rules:
   - gateway.networking.k8s.io
   resources:
   - backendtlspolicies
+  - gatewayclasses
+  - gateways
   - httproutes
   verbs:
   - get
   - list
-  - watch
-- apiGroups:
-  - gateway.networking.k8s.io
-  resources:
-  - gatewayclasses
-  - gateways
-  verbs:
-  - get
-  - list
-  - patch
-  - update
   - watch
 - apiGroups:
   - gateway.networking.k8s.io
@@ -74,5 +65,4 @@ rules:
   - httproutes/status
   verbs:
   - get
-  - patch
   - update
