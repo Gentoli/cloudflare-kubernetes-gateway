@@ -36,7 +36,8 @@ const gatewayFinalizer = "cfargotunnel.com/finalizer"
 const controllerName = "github.com/pl4nty/cloudflare-kubernetes-gateway"
 
 const (
-	AnnotationTunnelName = "cloudflare.com/tunnel-name"
+	AnnotationTunnelName    = "cloudflare.com/tunnel-name"
+	AnnotationEdgeIPVersion = "cfargotunnel.com/edge-ip-version"
 )
 
 // GatewayReconciler reconciles a Gateway object
@@ -618,6 +619,12 @@ func (r *GatewayReconciler) deploymentApplyConfigurationForGateway(
 		return nil, err
 	}
 
+	args := []string{"tunnel", "--no-autoupdate", "--metrics", "0.0.0.0:2000"}
+	if val, ok := gateway.Annotations[AnnotationEdgeIPVersion]; ok {
+		args = append(args, "--edge-ip-version", val)
+	}
+	args = append(args, "run")
+
 	dep := appsv1apply.Deployment(gateway.Name, gateway.Namespace).
 		WithLabels(ls).
 		WithSpec(appsv1apply.DeploymentSpec().
@@ -686,7 +693,7 @@ func (r *GatewayReconciler) deploymentApplyConfigurationForGateway(
 								WithDrop("ALL"),
 							),
 						).
-						WithArgs("tunnel", "--no-autoupdate", "--metrics", "0.0.0.0:2000", "run"),
+						WithArgs(args...),
 					),
 				),
 			).
