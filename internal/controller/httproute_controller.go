@@ -49,35 +49,52 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	// TODO delete DNS records. load all hostnames via tunnel ID in comment? but can't get DNS zone...
 	target := &gatewayv1.HTTPRoute{}
-	gateways := []gatewayv1.Gateway{}
-	hostnames := []gatewayv1.Hostname{}
-	err := r.Get(ctx, req.NamespacedName, target)
-	if err == nil {
-		for _, parentRef := range target.Spec.ParentRefs {
-			namespace := target.ObjectMeta.Namespace
-			if parentRef.Namespace != nil {
-				namespace = string(*parentRef.Namespace)
-			}
-			gateway := &gatewayv1.Gateway{}
-			if err := r.Get(ctx, types.NamespacedName{
-				Namespace: namespace,
-				Name:      string(parentRef.Name),
-			}, gateway); err != nil {
-				log.Error(err, "Failed to get Gateway")
-				return ctrl.Result{}, err
-			}
-			gateways = append(gateways, *gateway)
-		}
+	if err := r.Get(ctx, req.NamespacedName, target); err != nil {
+		log.Error(err, "Failed to get HTTPRoute")
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
 
-		hostnames = target.Spec.Hostnames
-	} else {
-		gatewayList := &gatewayv1.GatewayList{}
-		if err := r.List(ctx, gatewayList); err != nil {
-			log.Error(err, "Failed to list Gateways")
+	defer func() {
+		if updateErr := r.Status().Update(ctx, target); updateErr != nil {
+			log.Error(updateErr, "Failed to update HTTPRoute status")
+		}
+	}()
+
+	target.Status.Parents = []gatewayv1.RouteParentStatus{}
+	gateways := []gatewayv1.Gateway{}
+
+	for _, parentRef := range target.Spec.ParentRefs {
+		namespace := target.ObjectMeta.Namespace
+		if parentRef.Namespace != nil {
+			namespace = string(*parentRef.Namespace)
+		}
+		gateway := &gatewayv1.Gateway{}
+		if err := r.Get(ctx, types.NamespacedName{
+			Namespace: namespace,
+			Name:      string(parentRef.Name),
+		}, gateway); err != nil {
+			log.Error(err, "Failed to get Gateway")
 			return ctrl.Result{}, err
 		}
-		gateways = gatewayList.Items
+		gateways = append(gateways, *gateway)
+
+		target.Status.Parents = append(target.Status.Parents, gatewayv1.RouteParentStatus{
+			ParentRef:      parentRef,
+			ControllerName: "github.com/pl4nty/cloudflare-kubernetes-gateway",
+			Conditions: []metav1.Condition{
+				{
+					Type:               string(gatewayv1.RouteConditionAccepted),
+					Status:             metav1.ConditionTrue,
+					Reason:             string(gatewayv1.RouteReasonAccepted),
+					Message:            "Route accepted",
+					ObservedGeneration: target.Generation,
+					LastTransitionTime: metav1.Now(),
+				},
+			},
+		})
 	}
+
+	hostnames := target.Spec.Hostnames
 
 	routes := &gatewayv1.HTTPRouteList{}
 	if err := r.List(ctx, routes); err != nil {
@@ -86,6 +103,28 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	for _, gateway := range gateways {
+		setCondition := func(condType string, status metav1.ConditionStatus, reason, message string) {
+			if target == nil || len(target.Status.Parents) == 0 {
+				return
+			}
+			for i, p := range target.Status.Parents {
+				ns1 := target.Namespace
+				if p.ParentRef.Namespace != nil {
+					ns1 = string(*p.ParentRef.Namespace)
+				}
+				if ns1 == gateway.Namespace && string(p.ParentRef.Name) == gateway.Name {
+					meta.SetStatusCondition(&target.Status.Parents[i].Conditions, metav1.Condition{
+						Type:               condType,
+						Status:             status,
+						Reason:             reason,
+						Message:            message,
+						ObservedGeneration: target.Generation,
+					})
+					break
+				}
+			}
+		}
+
 		// check target is in scope
 		gatewayClass := &gatewayv1.GatewayClass{}
 		if err := r.Get(ctx, types.NamespacedName{
@@ -321,12 +360,15 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		})
 		if err != nil {
 			log.Error(err, "Failed to update Tunnel configuration")
+			setCondition("TunnelConfigured", metav1.ConditionFalse, "Failed", err.Error())
 			return ctrl.Result{}, err
 		}
 
 		log.Info("Updated Tunnel configuration", "ingress", ingress)
+		setCondition("TunnelConfigured", metav1.ConditionTrue, "TunnelConfigured", "Tunnel configuration updated")
 
 		if tunnelOnly {
+			setCondition("DNSConfigured", metav1.ConditionFalse, "TunnelOnly", "Tunnel only mode enabled, skipping DNS record updates")
 			continue
 		}
 
@@ -378,6 +420,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			}
 		}
 		log.Info("Updated DNS records", "hostnames", hostnames)
+		setCondition("DNSConfigured", metav1.ConditionTrue, "DNSConfigured", "DNS records updated")
 	}
 
 	return ctrl.Result{}, nil

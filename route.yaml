@@ -1,0 +1,44 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: nginx-proxy
+  namespace: infra-cf-gateway
+spec:
+  parentRefs:
+  - name: tunnel
+  hostnames:
+  - '*.k.nsyd.tech'
+  - 'matrix.nsyd.tech'
+  rules:
+  - backendRefs:
+    - name: main-external-nginx-ingress
+      namespace: nginx
+      port: 443
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: ReferenceGrant
+metadata:
+  name: cf-tunnel-nginx
+  namespace: nginx
+spec:
+  from:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    namespace: infra-cf-gateway
+  to:
+  - group: ""
+    kind: Service
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata:
+  name: main-external-nginx-ingress
+  namespace: nginx
+spec:
+  targetRefs:
+  - group: ""
+    kind: Service
+    name: main-external-nginx-ingress
+  validation:
+    wellKnownCACertificates: 'cloudflare.com/origin-ca'
+    hostname: 'nsyd.tech'
