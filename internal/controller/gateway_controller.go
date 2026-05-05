@@ -123,7 +123,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			return ctrl.Result{Requeue: true}, nil
 		}
 
-		if err := r.Update(ctx, gatewayClass); err != nil {
+		if err := r.SubResource("finalizers").Update(ctx, gatewayClass); err != nil {
 			log.Error(err, "Failed to update GatewayClass to add finalizer")
 			return ctrl.Result{}, err
 		}
@@ -145,7 +145,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			return ctrl.Result{Requeue: true}, nil
 		}
 
-		if err := r.Update(ctx, gateway); err != nil {
+		if err := r.SubResource("finalizers").Update(ctx, gateway); err != nil {
 			log.Error(err, "Failed to update Gateway to add finalizer")
 			return ctrl.Result{}, err
 		}
@@ -199,7 +199,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				return ctrl.Result{Requeue: true}, nil
 			}
 
-			if err := r.Update(ctx, gateway); err != nil {
+			if err := r.SubResource("finalizers").Update(ctx, gateway); err != nil {
 				log.Error(err, "Failed to remove finalizer for Gateway")
 				return ctrl.Result{}, err
 			}
@@ -572,7 +572,7 @@ func (r *GatewayReconciler) doFinalizerOperationsForGateway(ctx context.Context,
 	}
 	if len(gateways.Items) == 0 {
 		controllerutil.RemoveFinalizer(gatewayClass, gatewayClassFinalizer)
-		if err := r.Update(ctx, gatewayClass); err != nil {
+		if err := r.SubResource("finalizers").Update(ctx, gatewayClass); err != nil {
 			return err
 		}
 	}
