@@ -161,9 +161,25 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 
 		// fan out to siblings
-		ingress := []zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{}
+		type ingressData struct {
+			hostname            string
+			exactHostnameLen    int
+			wildcardHostnameLen int
+			path                string
+			pathLen             int
+			serviceURL          string
+			useTLS              bool
+			noTLSVerify         bool
+			originServerName    string
+			creationTimestamp   time.Time
+			namespace           string
+			name                string
+			ruleIndex           int
+		}
+		var ingressList []ingressData
+
 		for _, route := range siblingRoutes {
-			for _, rule := range route.Spec.Rules {
+			for rIdx, rule := range route.Spec.Rules {
 				paths := map[string]bool{}
 				if len(rule.Matches) == 0 {
 					paths["/"] = true
@@ -256,30 +272,94 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 				}
 
 				// product of hostname, path, service
-				for _, hostname := range route.Spec.Hostnames {
+				hostnames := route.Spec.Hostnames
+				if len(hostnames) == 0 {
+					hostnames = []gatewayv1.Hostname{""}
+				}
+				for _, hostname := range hostnames {
+					hostnameStr := string(hostname)
+					exactHostnameLen := 0
+					wildcardHostnameLen := 0
+					if hostnameStr != "" {
+						if strings.HasPrefix(hostnameStr, "*.") {
+							wildcardHostnameLen = len(hostnameStr)
+						} else {
+							exactHostnameLen = len(hostnameStr)
+						}
+					}
+					
 					for path := range paths {
+						pathLen := len(path)
 						for _, service := range services {
-							config := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
-								Hostname: cloudflare.String(string(hostname)),
-								Path:     cloudflare.String(path),
-								Service:  cloudflare.String(service.url),
-							}
-							if service.useTLS {
-								originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{
-									NoTLSVerify:    cloudflare.F(service.noTLSVerify),
-									HTTP2Origin:    cloudflare.F(true),
-									MatchSnItoHost: cloudflare.F(true),
-								}
-								if service.originServerName != "" {
-									originRequest.OriginServerName = cloudflare.F(service.originServerName)
-								}
-								config.OriginRequest = cloudflare.F(originRequest)
-							}
-							ingress = append(ingress, config)
+							ingressList = append(ingressList, ingressData{
+								hostname:            hostnameStr,
+								exactHostnameLen:    exactHostnameLen,
+								wildcardHostnameLen: wildcardHostnameLen,
+								path:                path,
+								pathLen:             pathLen,
+								serviceURL:          service.url,
+								useTLS:              service.useTLS,
+								noTLSVerify:         service.noTLSVerify,
+								originServerName:    service.originServerName,
+								creationTimestamp:   route.CreationTimestamp.Time,
+								namespace:           route.Namespace,
+								name:                route.Name,
+								ruleIndex:           rIdx,
+							})
 						}
 					}
 				}
 			}
+		}
+
+		slices.SortFunc(ingressList, func(a, b ingressData) int {
+			if a.exactHostnameLen != b.exactHostnameLen {
+				return b.exactHostnameLen - a.exactHostnameLen
+			}
+			if a.wildcardHostnameLen != b.wildcardHostnameLen {
+				return b.wildcardHostnameLen - a.wildcardHostnameLen
+			}
+
+			if a.pathLen != b.pathLen {
+				return b.pathLen - a.pathLen
+			}
+
+			if !a.creationTimestamp.Equal(b.creationTimestamp) {
+				if a.creationTimestamp.Before(b.creationTimestamp) {
+					return -1
+				}
+				return 1
+			}
+			if a.namespace != b.namespace {
+				return strings.Compare(a.namespace, b.namespace)
+			}
+			if a.name != b.name {
+				return strings.Compare(a.name, b.name)
+			}
+			return a.ruleIndex - b.ruleIndex
+		})
+
+		ingress := []zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{}
+		for _, item := range ingressList {
+			config := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+				Path:    cloudflare.String(item.path),
+				Service: cloudflare.String(item.serviceURL),
+			}
+			if item.hostname != "" {
+				config.Hostname = cloudflare.String(item.hostname)
+			}
+			if item.useTLS {
+				originRequest := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngressOriginRequest{
+					NoTLSVerify:    cloudflare.F(item.noTLSVerify),
+					HTTP2Origin:    cloudflare.F(true),
+					MatchSnItoHost: cloudflare.F(true),
+				}
+				if item.originServerName != "" {
+					originRequest.OriginServerName = cloudflare.F(item.originServerName)
+				}
+				config.OriginRequest = cloudflare.F(originRequest)
+			}
+			ingress = append(ingress, config)
 		}
 
 		// last rule must be the catch-all
