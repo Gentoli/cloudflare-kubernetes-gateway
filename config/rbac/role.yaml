@@ -34,6 +34,7 @@ rules:
   - deployments
   verbs:
   - create
+  - delete
   - get
   - list
   - patch
@@ -42,6 +43,7 @@ rules:
   - gateway.networking.k8s.io
   resources:
   - backendtlspolicies
+  - httproutes
   verbs:
   - get
   - list
@@ -54,21 +56,23 @@ rules:
   verbs:
   - get
   - list
+  - patch
   - update
   - watch
 - apiGroups:
   - gateway.networking.k8s.io
   resources:
   - gatewayclasses/finalizers
-  - gatewayclasses/status
   - gateways/finalizers
-  - gateways/status
   verbs:
   - update
 - apiGroups:
   - gateway.networking.k8s.io
   resources:
-  - httproutes
+  - gatewayclasses/status
+  - gateways/status
+  - httproutes/status
   verbs:
-  - list
-  - watch
+  - get
+  - patch
+  - update
